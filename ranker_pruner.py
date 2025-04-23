@@ -16,6 +16,8 @@ BUGS:
 DEBUG = False
 
 # Import necessary modules and packages
+import numpy as np
+import random
 from alive_progress import alive_it
 import itertools
 from enum import Enum
@@ -33,19 +35,11 @@ from tensorflow.keras.layers import (
     Conv2D,
     MaxPooling2D,
     Input,
-    Conv2DTranspose,
-    Concatenate,
     BatchNormalization,
-    UpSampling2D,
     Dropout,
     Activation,
-    GlobalAveragePooling1D,
-    ZeroPadding2D,
-    GlobalAveragePooling2D,
-    Reshape,
     Dense,
     Flatten,
-    Add,
 )
 from tensorflow.keras.optimizers import Adam, SGD, Adadelta
 from tensorflow.keras.activations import relu
@@ -273,6 +267,9 @@ def l2_scoring(a):
     return np.linalg.norm(a, axis=1)
 
 def leverage_scroing(a: np.ndarray)-> np.ndarray:
+    """
+    Fairly simple algo to calc leverage scores
+    """
 
     # Compute the eco SVD
     U, s, VT = np.linalg.svd(a, full_matrices=False)
@@ -281,8 +278,6 @@ def leverage_scroing(a: np.ndarray)-> np.ndarray:
 
     return leverage_scores
 
-import numpy as np
-import random
 
 def volume_score(
     X: np.ndarray,
@@ -292,7 +287,7 @@ def volume_score(
     random_seed: int = 42
 ) -> np.ndarray:
     """
-    Approximate the 'aggregate row importance' via random subset sampling.
+    Approximate the 'aggregate row importance' by volume sampling
     
     Parameters
     ----------
@@ -316,17 +311,17 @@ def volume_score(
     random.seed(random_seed)
     n, d = X.shape
 
+
+    # TODO: This is a messy why to handle cases where the matrix is 
+    #       overparameterized
     if n < d:
         return np.ones(n)
     
     # Determine the minimum and maximum subset sizes
     k_min = max(int(np.ceil(subset_size_min_frac * n)), 1)
     k_max = min(int(np.floor(subset_size_max_frac * n)), n)
+
     # For a valid Gram matrix-based volume measure, you'd want at least d rows in a subset
-    # if you're thinking of "rank-d" volume. But for partial or reduced dimension, some
-    # folks still just compute det( X[S,:]^T X[S,:] ) even if |S| < d; 
-    # it's just no longer the full-rank "volume". 
-    # If you want to ensure subsets have at least 'd' rows, do:
     k_min = max(k_min, d)
     
     if k_max < k_min:
@@ -358,140 +353,6 @@ def volume_score(
         row_importance /= total_volume
         
     return row_importance
-
-
-def old_volume_score(X: np.ndarray) -> np.ndarray:
-    """
-    Compute aggregate row importance based on volume sampling over a restricted range
-    of subset sizes (between 10% and 30% of the total number of rows).
-
-    For a matrix X (shape n x d, with n >= d), this function:
-      1. Iterates over all subsets of rows of size k, with k in [max(d, 0.1*n), 0.3*n].
-      2. For each subset S, computes the "volume" via:
-             volume^2 = det(X[S, :].T @ X[S, :])
-         (This is equivalent to the square of the volume when |S| == d.)
-      3. Aggregates the value for each row (i.e., adds the volume score to rows participating in S).
-      4. Normalizes the aggregated importance by the total volume.
-
-    Parameters:
-    -----------
-    X : np.ndarray
-        Input matrix of shape (n, d). Must have n >= d.
-
-    Returns:
-    --------
-    np.ndarray
-        A one-dimensional vector of length n giving the normalized aggregate importance
-        (filter importance) for each row.
-    
-    Note:
-    -----
-    This method reduces the overall iterations compared to enumerating every possible 
-    subset by focusing on subset sizes between 10% and 30% of the rows.
-    """
-    n, d = X.shape
-    if n < d:
-        return  np.ones(n)
-        #raise ValueError("The number of rows must be at least equal to the number of columns.")
-    
-    print(f"n is: {n}")
-    # Determine the range of subset sizes to consider.
-    k_min = int(np.ceil(0.1 * n))
-    k_max = int(np.floor(0.11 * n))
-    k_min = max(k_min, d)  # Ensure we have at least d rows to compute a dxd Gram matrix.
-    if k_max < k_min:
-        # If the upper bound is too small (e.g., when n is very small), set k_max equal to k_min.
-        k_max = k_min
-
-    total_volume = 0.0
-    row_importance = np.zeros(n)
-    
-    # Iterate over allowed subset sizes.
-    for k in range(k_min, k_max + 1):
-        # Use a generator to avoid holding all combinations in memory.
-        for subset in alive_it(itertools.combinations(range(n), k)):
-            S = list(subset)
-            # Compute the Gram matrix (d x d) for the subset S.
-            gram_matrix = X[S, :].T @ X[S, :]
-            # Compute the determinant; this represents the squared volume spanned by the rows in S.
-            vol_sq = np.linalg.det(gram_matrix)
-            # Taking absolute value to avoid numerical issues with negative determinants.
-            vol_sq = np.abs(vol_sq)
-            total_volume += vol_sq
-            # Add the computed volume score to each row in the subset.
-            for i in S:
-                row_importance[i] += vol_sq
-    
-    if total_volume == 0:
-        return np.zeros(n)
-    else:
-        return row_importance / total_volume
-
-#def volume_score(X: np.ndarray) -> np.ndarray:
-#    """
-#    Computes the aggregate row probability (importance) based on volume sampling.
-#    
-#    For a matrix X of shape (n, d), this function:
-#    
-#    1. Enumerates all subsets of rows of size d.
-#    2. For each subset S, computes the squared volume (i.e. squared determinant)
-#       of the corresponding submatrix X[S, :].
-#    3. Normalizes these squared volumes to obtain a probability distribution over the subsets.
-#    4. For each row i in X, sums the probabilities of all subsets that include row i.
-#    
-#    This aggregated sum is taken as the "importance" of that row.
-#    
-#    Parameters:
-#    -----------
-#    X : np.ndarray
-#        An input matrix of shape (n, d) with n >= d.
-#    
-#    Returns:
-#    --------
-#    np.ndarray
-#        A one-dimensional vector of length n where the i-th element is the aggregated 
-#        probability (importance) of row i.
-#    
-#    Note:
-#    -----
-#    This brute-force approach has a computational complexity of O(choose(n, d)) and is 
-#    feasible only for small matrices.
-#    """
-#    n, d = X.shape
-#    if n < d:
-#        return  np.ones(n)
-#    #    raise ValueError("The number of rows must be at least equal to the number of columns.")
-#    
-#    # Enumerate all subsets of rows of size d.
-#    subsets = list(itertools.combinations(range(n), d))
-#    print(f"HEREEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE")
-#    print('enumerated')
-#
-#    
-#    # Compute the squared determinant (volume squared) for each subset.
-#    volume_squares = []
-#    for subset in subsets:
-#    #for subset in alive_it(subsets)):
-#        submatrix = X[list(subset), :]  # submatrix of shape (d, d)
-#        # Squared volume: square the determinant to avoid sign issues.
-#        vol_sq = np.linalg.det(submatrix)**2
-#        volume_squares.append(vol_sq)
-#    volume_squares = np.array(volume_squares)
-#    
-#    # Normalize to obtain a probability distribution over the subsets.
-#    total_volume = np.sum(volume_squares)
-#    if total_volume == 0:
-#        # Degenerate case: If total volume is zero, all subsets have zero "importance".
-#        return np.zeros(n)
-#    subset_probabilities = volume_squares / total_volume
-#
-#    # Aggregate the probabilities per row.
-#    row_importance = np.zeros(n)
-#    for prob, subset in zip(subset_probabilities, subsets):
-#        for i in subset:
-#            row_importance[i] += prob
-#
-#    return row_importance
 
 # Define a function to extract weights from a model
 def extract_weights(model, output: Path, scoring_func: PruneType):
@@ -612,16 +473,6 @@ def fpgm(model, opts, dist_type="l2"):
     df.to_csv(os.path.join(opts.output, "fpgm.csv"), header=False)
     df = pd.DataFrame(idx_results, index=None)
     df.to_csv(os.path.join(opts.output, "fpgm_idx.csv"), header=False)
-
-
-# Parse command line arguments
-# def parseArgs(argv):
-#    parser = argparse.ArgumentParser()
-#    parser.add_argument('-o', '--output', help='')
-#    parser.add_argument('-i', '--model_dir', help='')
-#    parser.add_argument('-type', '--type', choices={'l2', 'fpgm'}, help='')
-#    opts = parser.parse_args()
-#    return opts
 
 def copy_weights(pre_trained_model, target_model, ranks_path):
     ranks = pd.read_csv(ranks_path, header=None).values
@@ -776,9 +627,6 @@ def resnet_block_fixed(input_data, in_filters, out_filters, conv_size, r):
 
     return x
 
-
-# TODO: Difference between providing l2.csv and l2_idx.csv
-# IMPORTANT!!
 
 
 def custom_prune_model(
